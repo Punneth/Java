@@ -1,0 +1,324 @@
+package com.transaction.service.impl;
+
+import com.transaction.analytics.service.model.*;
+import com.transaction.analytics.service.model.CommonBean;
+import com.transaction.common.constants.ChannelType;
+import com.transaction.common.constants.ErrorCodeEnum;
+import com.transaction.common.exception.*;
+import com.transaction.common.util.ApplicationLogger;
+import com.transaction.dto.*;
+import com.transaction.repository.*;
+import com.transaction.service.TransactionAnalyticService;
+import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
+import org.springframework.retry.annotation.Retryable;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.*;
+import java.util.stream.Collectors;
+
+/**
+ * Service implementation for processing and aggregating transaction analytics.
+ */
+
+@Service
+@RequiredArgsConstructor
+public class TransactionAnalyticServiceImpl implements TransactionAnalyticService {
+
+    private static final ApplicationLogger logger = ApplicationLogger.getLogger(TransactionAnalyticServiceImpl.class);
+
+    private final TitanTransactionDetailsRepository titanTransactionDetailsRepository;
+    private final TitanTransactionRepository titanTransactionRepository;
+    private final MerchantBasicInfoRepository merchantBasicInfoRepository;
+    private final ChannelProductMasterRepository channelProductMasterRepository;
+
+    /**
+     * Fetches transaction analytics data based on request criteria such as
+     * date range, channel, merchant, and user role.
+     *
+     * @param txnAnalyticRequest request containing analytics filters
+     * @param commonBean common request data
+     * @return aggregated transaction analytics response
+     */
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    @Override
+    public TxnAnalyticResponse fetchTransactionAnalytics(TxnAnalyticRequest txnAnalyticRequest, CommonBean commonBean) {
+
+        try {
+
+            String userRole = txnAnalyticRequest.getUserRole().getValue();
+            LocalDateTime fromDateTime = txnAnalyticRequest.getFromDate().atStartOfDay();
+            LocalDateTime toDateTime = txnAnalyticRequest.getToDate().atTime(23, 59, 59);
+
+            if (fromDateTime.isAfter(toDateTime)) {
+                throw new InvalidAnalyticsRequestException(ErrorCodeEnum.INVALID_DATE_RANGE.getErrorMessage());
+            }
+
+            List<Integer> merchantIdList = userRole.equalsIgnoreCase("RESELLER")
+                    ? merchantBasicInfoRepository.findMerchantsForReseller(commonBean.getSourceId(), commonBean.getSubSourceId())
+                    : List.of(txnAnalyticRequest.getMerchId());
+
+            if (merchantIdList == null || merchantIdList.isEmpty()) {
+                throw new MerchantNotFoundException(ErrorCodeEnum.MERCHANT_NOT_FOUND.getErrorMessage());
+            }
+
+            logger.info("Fetched merchantId list {}", merchantIdList);
+
+            String channelName = txnAnalyticRequest.getChannelName().getValue();
+            TxnAnalyticResponse txnAnalyticResponse = new TxnAnalyticResponse();
+            txnAnalyticResponse.setMerchId(txnAnalyticRequest.getMerchId());
+            txnAnalyticResponse.setRequestorId(txnAnalyticRequest.getRequestorId());
+
+            if (channelName.equalsIgnoreCase("ONLINE") || channelName.equalsIgnoreCase("QR")) {
+                int channelId = channelName.equalsIgnoreCase("ONLINE") ? 1 : 4;
+                txnAnalyticResponse = filterOnlineOrQRTransactions(txnAnalyticResponse,
+                        txnAnalyticRequest, commonBean, channelId, merchantIdList, fromDateTime, toDateTime);
+            } else {
+                txnAnalyticResponse = filterPOSTransactions(txnAnalyticResponse, merchantIdList, fromDateTime, toDateTime);
+            }
+
+            return txnAnalyticResponse;
+
+        } catch (BaseException e) {
+            throw e;
+        } catch (CannotGetJdbcConnectionException e) {
+            throw e;
+        } catch (DataAccessException e) {
+            logger.error("Non-retryable database error occurred while fetching transaction analytics data: {}",
+                    ExceptionUtils.getStackTrace(e));
+            throw new AnalyticsServiceUnavailableException("Failed to fetch transaction analytics data due to database error",
+                    ErrorCodeEnum.DATABASE_ERROR.getErrorCode());
+        } catch (Exception e) {
+            logger.error("Unexpected error in txnAnalyticRequest: {}",
+                    ExceptionUtils.getStackTrace(e));
+            throw new AnalyticsServiceUnavailableException("Failed to fetch transaction analytic data", ErrorCodeEnum.DATABASE_ERROR.getErrorCode());
+        }
+    }
+
+    private TxnAnalyticResponse filterPOSTransactions(TxnAnalyticResponse txnAnalyticResponse, List<Integer> merchantIdList,
+                                                      LocalDateTime fromDateTime, LocalDateTime toDateTime) {
+        ArrayList<DayWiseTxnSummary> dayWiseTxnSummaries = new ArrayList<>();
+        ArrayList<ProductWiseTxnSummary> productWiseTxnSummaries = new ArrayList<>();
+
+        List<PosTransactionSummaryDTO> posTransactions =
+                titanTransactionRepository.getPosTransactions(fromDateTime, toDateTime, merchantIdList);
+
+        if (posTransactions.isEmpty()) {
+            throw new TransactionNotFoundException(ErrorCodeEnum.TRANSACTIONS_NOT_FOUND.getErrorMessage());
+        }
+
+        List<String> products = posTransactions.stream()
+                .map(txn -> txn.bankProduct() + "-" + txn.channelType())
+                .distinct()
+                .toList();
+
+        List<PosTransactionSummaryDTO> successTransactionList =
+                posTransactions.stream()
+                        .filter(txn -> Integer.valueOf(1).equals(txn.txnStatus()))
+                        .toList();
+
+        txnAnalyticResponse.setSuccessCount(successTransactionList.stream()
+                .map(entity -> Integer.valueOf(String.valueOf(entity.count())))
+                .reduce(0, Integer::sum));
+
+        txnAnalyticResponse.setFailureCount(posTransactions.stream()
+                .filter(txn -> Integer.valueOf(0).equals(txn.txnStatus()))
+                .map(entity -> Integer.valueOf(String.valueOf(entity.count())))
+                .reduce(0, Integer::sum));
+
+        Map<LocalDate, List<PosTransactionSummaryDTO>> groupedByDate =
+                posTransactions.stream()
+                        .collect(Collectors.groupingBy(txn ->
+                                txn.txnDate().toInstant()
+                                        .atZone(ZoneId.systemDefault())
+                                        .toLocalDate()
+                        ));
+
+        for (Map.Entry<LocalDate, List<PosTransactionSummaryDTO>> entry : groupedByDate.entrySet()) {
+            LocalDate date = entry.getKey();
+            List<PosTransactionSummaryDTO> dayWiseTransactionList = entry.getValue();
+
+            int dayWiseSuccessCount = dayWiseTransactionList.stream()
+                    .filter(txn -> Integer.valueOf(1).equals(txn.txnStatus()))
+                    .mapToInt(txn -> Optional.ofNullable(txn.count()).orElse(0L).intValue())
+                    .sum();
+
+            int dayWiseFailureCount = dayWiseTransactionList.stream()
+                    .mapToInt(txn -> Optional.ofNullable(txn.count()).orElse(0L).intValue())
+                    .sum() - dayWiseSuccessCount;
+
+            DayWiseTxnSummary dayWiseTxnSummary = new DayWiseTxnSummary();
+            dayWiseTxnSummary.setDate(date);
+            dayWiseTxnSummary.setDayWiseSuccessCount(dayWiseSuccessCount);
+            dayWiseTxnSummary.setDayWiseFailedCount(dayWiseFailureCount);
+
+            dayWiseTxnSummaries.add(dayWiseTxnSummary);
+        }
+
+        txnAnalyticResponse.setDayWiseTxnSummary(dayWiseTxnSummaries);
+
+        for (String product : products) {
+            List<PosTransactionSummaryDTO> successTransactions =
+                    posTransactions.stream()
+                            .filter(txn -> ((txn.bankProduct() + "-" + txn.channelType()).equals(product)))
+                            .toList();
+
+            Integer successCount = successTransactions.stream()
+                    .filter(txn -> Integer.valueOf(1).equals(txn.txnStatus()))
+                    .map(entity -> Integer.valueOf(String.valueOf(entity.count())))
+                    .reduce(0, Integer::sum);
+
+            ProductWiseTxnSummary productWiseTxnSummary = new ProductWiseTxnSummary();
+            productWiseTxnSummary.setProductName(product.split("-")[0]);
+            productWiseTxnSummary.setProductWiseSuccessCount(successCount);
+            productWiseTxnSummaries.add(productWiseTxnSummary);
+        }
+        txnAnalyticResponse.setProductWiseTxnSummary(productWiseTxnSummaries);
+        txnAnalyticResponse.setInitiatedCount(0);
+        txnAnalyticResponse.setRevertedCount(0);
+        txnAnalyticResponse.setAwaitedCount(0);
+
+        return txnAnalyticResponse;
+
+    }
+
+    private TxnAnalyticResponse filterOnlineOrQRTransactions(TxnAnalyticResponse txnAnalyticResponse,
+                                                             TxnAnalyticRequest txnAnalyticRequest, CommonBean commonBean, Integer channelId,
+                                                             List<Integer> merchantIdList, LocalDateTime fromDateTime, LocalDateTime toDateTime) {
+
+        ArrayList<DayWiseTxnSummary> dayWiseTxnSummaries = new ArrayList<>();
+        ArrayList<ProductWiseTxnSummary> productWiseTxnSummaries = new ArrayList<>();
+
+        List<OnlineQrTransactionSummaryDTO> onlineOrQrTransactions =
+                titanTransactionDetailsRepository.getOnlineOrQrTransactions(fromDateTime, toDateTime, merchantIdList, channelId);
+
+        if (onlineOrQrTransactions.isEmpty()) {
+            throw new TransactionNotFoundException(ErrorCodeEnum.TRANSACTIONS_NOT_FOUND.getErrorMessage());
+        }
+
+        List<ChannelProductDTO> allProducts = channelProductMasterRepository.findAllProductsAsDTO();
+        Map<Integer, String> productMap = allProducts.stream()
+                .collect(
+                        Collectors.toMap(ChannelProductDTO::channelProdId, ChannelProductDTO::channelProdName)
+                );
+
+        List<String> products = onlineOrQrTransactions.stream()
+                .map(
+                        txn -> productMap.get(txn.channelProdId()) + "-" + ChannelType.fromId(txn.channelId())
+                )
+                .distinct()
+                .toList();
+
+        List<Integer> merchIdList =
+                commonBean.getUserRole().getValue().equalsIgnoreCase("RESELLER")
+                        ? merchantIdList
+                        : List.of(txnAnalyticRequest.getMerchId());
+
+        txnAnalyticResponse.setInitiatedCount(titanTransactionDetailsRepository.countInitiated(fromDateTime,
+                toDateTime, merchIdList, channelId));
+
+        txnAnalyticResponse.setAwaitedCount(titanTransactionDetailsRepository.countAttempted(fromDateTime,
+                toDateTime, merchIdList, channelId));
+
+        txnAnalyticResponse.setRevertedCount(titanTransactionDetailsRepository.countReverted(fromDateTime,
+                toDateTime, merchIdList, channelId));
+
+        List<OnlineQrTransactionSummaryDTO> successTransactionList =
+                onlineOrQrTransactions.stream()
+                        .filter(txn -> Integer.valueOf(1).equals(txn.txnStatus()))
+                        .toList();
+
+        txnAnalyticResponse.setSuccessCount(successTransactionList.stream()
+                .map(entity -> Integer.valueOf(String.valueOf(entity.count())))
+                .reduce(0, Integer::sum));
+
+        txnAnalyticResponse.setFailureCount(onlineOrQrTransactions.stream()
+                .filter(txn -> Integer.valueOf(0).equals(txn.txnStatus()))
+                .map(entity -> Integer.valueOf(String.valueOf(entity.count())))
+                .reduce(0, Integer::sum));
+
+        // Group transactions by LocalDate (ignoring time)
+        Map<LocalDate, List<OnlineQrTransactionSummaryDTO>> groupedByDate =
+                onlineOrQrTransactions.stream()
+                        .collect(Collectors.groupingBy(txn ->
+                                txn.txnDate().toInstant()
+                                        .atZone(ZoneId.systemDefault())
+                                        .toLocalDate()
+                        ));
+
+        for (Map.Entry<LocalDate, List<OnlineQrTransactionSummaryDTO>> entry : groupedByDate.entrySet()) {
+            LocalDate date = entry.getKey();
+            List<OnlineQrTransactionSummaryDTO> dayWiseTransactionList = entry.getValue();
+
+            int dayWiseSuccessCount = dayWiseTransactionList.stream()
+                    .filter(txn -> Integer.valueOf(1).equals(txn.txnStatus()))
+                    .mapToInt(txn -> Optional.ofNullable(txn.count()).orElse(0L).intValue())
+                    .sum();
+
+            int dayWiseFailureCount = dayWiseTransactionList.stream()
+                    .mapToInt(txn -> Optional.ofNullable(txn.count()).orElse(0L).intValue())
+                    .sum() - dayWiseSuccessCount;
+
+            DayWiseTxnSummary dayWiseTxnSummary = new DayWiseTxnSummary();
+            dayWiseTxnSummary.setDate(date);
+            dayWiseTxnSummary.setDayWiseSuccessCount(dayWiseSuccessCount);
+            dayWiseTxnSummary.setDayWiseFailedCount(dayWiseFailureCount);
+
+            dayWiseTxnSummaries.add(dayWiseTxnSummary);
+        }
+
+        txnAnalyticResponse.setDayWiseTxnSummary(dayWiseTxnSummaries);
+
+        for (String product : products) {
+            List<OnlineQrTransactionSummaryDTO> successTransactions =
+                    onlineOrQrTransactions.stream()
+                            .filter(txn -> (productMap.get(txn.channelProdId()) + "-" + ChannelType.fromId(txn.channelId())).equals(product))
+                            .toList();
+
+            Integer successCount = successTransactions.stream()
+                    .filter(txn -> Integer.valueOf(1).equals(txn.txnStatus()))
+                    .map(entity -> Integer.valueOf(String.valueOf(entity.count())))
+                    .reduce(0, Integer::sum);
+
+            ProductWiseTxnSummary productWiseTxnSummary = new ProductWiseTxnSummary();
+            productWiseTxnSummary.setProductName(product.split("-")[0]);
+            productWiseTxnSummary.setProductWiseSuccessCount(successCount);
+            productWiseTxnSummaries.add(productWiseTxnSummary);
+        }
+        txnAnalyticResponse.setProductWiseTxnSummary(productWiseTxnSummaries);
+
+        return txnAnalyticResponse;
+
+    }
+
+    @Recover
+    public TxnAnalyticResponse recoverFromDbFailure(CannotGetJdbcConnectionException ex) {
+
+        logger.error("DB failed after retries: {}", ex.getMessage());
+
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(), ErrorCodeEnum.DATABASE_ERROR.getErrorCode()
+        );
+    }
+}
