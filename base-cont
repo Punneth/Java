@@ -1,0 +1,172 @@
+package com.transaction.controller;
+
+import com.transaction.common.constants.AppHeaders;
+import com.transaction.common.messages.AppLogMessages;
+import com.transaction.common.util.ApplicationLogger;
+import org.springframework.beans.factory.annotation.Value;
+import org.slf4j.MDC;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.server.ResponseStatusException;
+import java.time.OffsetDateTime;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
+
+/**
+ * Base controller providing common functionality for all Item API controllers.
+ * Handles timeout management and response header configuration.
+ */
+public abstract class BaseTransactionAnalyticsController {
+
+    private static final ApplicationLogger logger = ApplicationLogger.getLogger(BaseTransactionAnalyticsController.class);
+    protected final NativeWebRequest request;
+    protected final ExecutorService executorService;
+
+    @Value("${api.timeout.ms:5000}")
+    protected long timeoutMs;
+
+    protected BaseTransactionAnalyticsController(NativeWebRequest request, ExecutorService executorService) {
+        this.request = request;
+        this.executorService = executorService;
+    }
+
+    public Optional<NativeWebRequest> getRequest() {
+        return Optional.ofNullable(request);
+    }
+
+    /**
+     * Execute operation with timeout and standard error handling.
+     * Throws ResponseStatusException on error, which is handled by GlobalExceptionHandler.
+     *
+     * MDC context is propagated to the executor thread to maintain traceability.
+     *
+     * @param operation The operation to execute
+     * @param operationName Name of the operation for logging
+     * @param xTraceId Trace ID for request tracking
+     * @param xReceivedAt Timestamp when request was received
+     * @param <T> Response body type
+     * @return ResponseEntity with appropriate status and headers
+     * @throws ResponseStatusException when timeout or error occurs
+     */
+    protected <T> ResponseEntity<T> executeWithTimeout(
+            Supplier<ResponseEntity<T>> operation,
+            String operationName,
+            UUID xTraceId,
+            OffsetDateTime xReceivedAt) {
+
+        // Capture MDC context from parent thread
+        Map<String, String> mdcContext = MDC.getCopyOfContextMap();
+
+        // Submit operation with MDC context propagation
+        Future<ResponseEntity<T>> future = executorService.submit(() -> {
+            try {
+                // Set MDC in executor thread
+                if (mdcContext != null) {
+                    MDC.setContextMap(mdcContext);
+                }
+                return operation.get();
+            } finally {
+                // Clean up MDC after execution
+                MDC.clear();
+            }
+        });
+
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            logger.error(AppLogMessages.REQUEST_TIMEOUT, Map.of(
+                    "timeoutMs", timeoutMs,
+                    "operation", operationName,
+                    "traceId", xTraceId
+            ));
+            throw new ResponseStatusException(
+                    HttpStatus.GATEWAY_TIMEOUT,
+                    "Request timeout after " + timeoutMs + "ms for operation: " + operationName);
+        } catch (InterruptedException | ExecutionException e) {
+            logger.error(AppLogMessages.ERROR_EXECUTING, e, Map.of(
+                    "operation", operationName,
+                    "traceId", xTraceId
+            ));
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Error executing operation: " + operationName);
+        }
+    }
+
+    protected ResponseEntity.BodyBuilder withStandardHeaders(
+            ResponseEntity.BodyBuilder builder,
+            UUID xTraceId,
+            OffsetDateTime xReceivedAt) {
+        return builder
+                .header(AppHeaders.TRACE_ID, xTraceId.toString())
+                .header(AppHeaders.RECEIVED_AT, xReceivedAt.toString());
+    }
+
+    /**
+     * Execute operation with custom timeout and standard error handling.
+     * Allows overriding default timeout for specific operations.
+     * MDC context is propagated to the executor thread to maintain traceability.
+     *
+     * @param operation The operation to execute
+     * @param operationName Name of the operation for logging
+     * @param xTraceId Trace ID for request tracking
+     * @param xReceivedAt Timestamp when request was received
+     * @param customTimeoutMs Custom timeout in milliseconds
+     * @param <T> Response body type
+     * @return ResponseEntity with appropriate status and headers
+     * @throws ResponseStatusException when timeout or error occurs
+     */
+    protected <T> ResponseEntity<T> executeWithTimeout(
+            Supplier<ResponseEntity<T>> operation,
+            String operationName,
+            UUID xTraceId,
+            OffsetDateTime xReceivedAt,
+            long customTimeoutMs) {
+
+        // Capture MDC context from parent thread
+        Map<String, String> mdcContext = MDC.getCopyOfContextMap();
+
+        // Submit operation with MDC context propagation
+        Future<ResponseEntity<T>> future = executorService.submit(() -> {
+            try {
+                // Set MDC in executor thread
+                if (mdcContext != null) {
+                    MDC.setContextMap(mdcContext);
+                }
+                return operation.get();
+            } finally {
+                // Clean up MDC after execution
+                MDC.clear();
+            }
+        });
+
+        try {
+            return future.get(customTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            logger.error(AppLogMessages.REQUEST_TIMEOUT, Map.of(
+                    "timeoutMs", customTimeoutMs,
+                    "operation", operationName,
+                    "traceId", xTraceId
+            ));
+            throw new ResponseStatusException(
+                    HttpStatus.GATEWAY_TIMEOUT,
+                    "Request timeout after " + customTimeoutMs + "ms for operation: " + operationName);
+        } catch (InterruptedException | ExecutionException e) {
+            logger.error(AppLogMessages.ERROR_EXECUTING, e, Map.of(
+                    "operation", operationName,
+                    "traceId", xTraceId
+            ));
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Error executing operation: " + operationName);
+        }
+    }
+
+}
+ 
