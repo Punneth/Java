@@ -1,0 +1,58 @@
+package com.transaction.controller;
+
+import com.transaction.analytics.service.model.TxnAnalyticPayload;
+import com.transaction.analytics.service.model.TxnAnalyticResponse;
+import com.transaction.common.constants.AppHeaders;
+import com.transaction.common.util.ApplicationLogger;
+import com.transaction.service.TransactionAnalyticService;
+import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.context.request.NativeWebRequest;
+
+import java.time.OffsetDateTime;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+
+/**
+ * Controller for retrieving transaction analytics data.
+ */
+@RestController
+public class TransactionAnalyticController extends BaseTransactionAnalyticsController {
+
+    private static final ApplicationLogger logger = ApplicationLogger.getLogger(TransactionAnalyticController.class);
+
+    private final TransactionAnalyticService transactionAnalyticService;
+
+    @Autowired
+    public TransactionAnalyticController(NativeWebRequest request, ExecutorService executorService, TransactionAnalyticService transactionAnalyticService) {
+        super(request, executorService);
+        this.transactionAnalyticService = transactionAnalyticService;
+    }
+
+    /**
+     * Fetches transaction analytics data based on the request payload data.
+     *
+     * @param xTraceId unique trace identifier for the request
+     * @param xReceivedAt timestamp when the request was received
+     * @param txnAnalyticPayload request payload containing analytics data
+     * @return transaction analytics response wrapped in {@link ResponseEntity}
+     */
+    @PostMapping(value = "/fetchTxnAnalyticsData", produces = { MediaType.APPLICATION_JSON_VALUE }, consumes = { MediaType.APPLICATION_JSON_VALUE })
+    public ResponseEntity<TxnAnalyticResponse> fetchTransactionAnalytics(
+            @RequestHeader(value = AppHeaders.TRACE_ID, required = true) UUID xTraceId,
+            @RequestHeader(value = AppHeaders.RECEIVED_AT, required = true) OffsetDateTime xReceivedAt,
+            @Valid @RequestBody TxnAnalyticPayload txnAnalyticPayload) {
+        logger.info("Processing transaction analytic data with request {}", txnAnalyticPayload);
+
+        TxnAnalyticResponse txnAnalyticResponse = transactionAnalyticService.fetchTransactionAnalytics(
+                txnAnalyticPayload.getTxnAnalyticRequest(), txnAnalyticPayload.getCommonBean());
+
+        return withStandardHeaders(ResponseEntity.ok(), xTraceId, xReceivedAt)
+                .body(txnAnalyticResponse);
+
+    }
+
+}
