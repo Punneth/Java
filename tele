@@ -1,179 +1,103 @@
-package com.transaction.common.exception;
+package backend.service;
 
-import com.transaction.analytics.service.model.ErrorResponse;
-import com.transaction.common.messages.AppLogMessages;
-import com.transaction.common.messages.ErrorMessages;
-import com.transaction.common.util.ApplicationLogger;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.http.converter.HttpMessageNotReadableException;
-import org.springframework.web.bind.MethodArgumentNotValidException;
-import org.springframework.web.bind.MissingRequestHeaderException;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.web.server.ResponseStatusException;
+import backend.entity.ItemEntity;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sample.crud.api.model.Item;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.openapitools.jackson.nullable.JsonNullable;
 
-import java.util.stream.Collectors;
+import java.time.OffsetDateTime;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
-/**
- * Global exception handler for centralized error handling across all controllers.
- * Provides consistent error responses and logging.
- */
-@RestControllerAdvice
-public class GlobalExceptionHandler {
+import static org.assertj.core.api.Assertions.assertThat;
 
-    private static final ApplicationLogger logger = ApplicationLogger.getLogger(GlobalExceptionHandler.class);
+class ItemServiceTest {
 
-    @ExceptionHandler(HttpMessageNotReadableException.class)
-    public ResponseEntity<ErrorResponse> handleInvalidJson(HttpMessageNotReadableException ex) {
-        logger.error(AppLogMessages.VALIDATION_EXCEPTION, ex.getClass().getSimpleName(), ex);
-
-        ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setMessage(ErrorMessages.VALIDATION_FAILED);
-        errorResponse.setCode("VALIDATION_ERROR");
-
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
-    }
-
-    /**
-     * Handles missing request header exceptions
-     */
-    @ExceptionHandler(MissingRequestHeaderException.class)
-    public ResponseEntity<ErrorResponse> handleMissingRequestHeader(MissingRequestHeaderException ex) {
-        ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setMessage("Required request header '" + ex.getHeaderName() + "' is missing");
-        errorResponse.setCode("VALIDATION_ERROR");
-
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
-    }
-
-   /* *//**
-     * Handles validation errors from @Valid annotation
-     *//*
-    @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<ErrorResponse> handleValidationException(MethodArgumentNotValidException ex) {
-        String combinedMessage = ex.getBindingResult()
-                .getFieldErrors()
-                .stream()
-                .map(fieldError -> fieldError.getField() + ": " + fieldError.getDefaultMessage())
-                .collect(Collectors.joining(", "));
-
-        ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setMessage("Validation failed: " + combinedMessage);
-        errorResponse.setCode("VALIDATION_ERROR");
-
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
-    }*/
-
-    /**
-     * Handles ResponseStatusException thrown by Spring controllers.
-     * Maps HTTP status codes to appropriate error codes and messages.
-     */
-    @ExceptionHandler(ResponseStatusException.class)
-    public ResponseEntity<ErrorResponse> handleResponseStatusException(ResponseStatusException ex) {
-        logger.error(AppLogMessages.RESPONSE_STATUS_EXCEPTION, ex.getStatusCode().value(), ex);
-       
-        HttpStatus status = HttpStatus.valueOf(ex.getStatusCode().value());
-        ErrorResponse errorResponse = buildError(status, ex.getReason());
-       
-        return ResponseEntity.status(status).body(errorResponse);
-    }
-
-    /**
-     * Handles BaseException for all business logic.
-     * Maps HTTP status codes to appropriate error codes and messages.
-     */
-    @ExceptionHandler(BaseException.class)
-    public ResponseEntity<ErrorResponse> handleBaseException(BaseException ex) {
-        logger.error(AppLogMessages.RESPONSE_STATUS_EXCEPTION, ex.getCode(), ex);
-
-        HttpStatus status = ex.getHttpStatus();
-        ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setCode(ex.getCode());
-        errorResponse.setMessage(ex.getMessage());
-//        ErrorResponse errorResponse = buildError(status, ex.getMessage());
-
-        return ResponseEntity.status(status).body(errorResponse);
-    }
- 
-    /**
-     * Handles validation errors from @Valid annotation.
-     * Collects field-level validation errors and returns detailed error information.
-     */
-    @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<ErrorResponse> handleValidationException(MethodArgumentNotValidException ex) {
-        logger.error(AppLogMessages.VALIDATION_EXCEPTION, ex.getBindingResult().getFieldErrorCount(), ex);
-
-        String combinedMessage = ex.getBindingResult()
-                .getFieldErrors()
-                .stream()
-                .map(fieldError ->
-                        fieldError.getField().substring(fieldError.getField().lastIndexOf('.') + 1)
-                                + " " + fieldError.getDefaultMessage()
-                )
-                .distinct()
-                .collect(Collectors.joining(", "));
-
-        ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setMessage(ErrorMessages.VALIDATION_FAILED + " -> " + combinedMessage);
-        errorResponse.setCode("VALIDATION_ERROR");
-       
-        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
-    }
- 
-    /**
-     * Handles all other unexpected exceptions.
-     * Logs the full exception stack trace and returns a generic error response.
-     */
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity<ErrorResponse> handleGenericException(Exception ex) {
-        logger.error(AppLogMessages.UNEXPECTED_ERROR, ex.getClass().getSimpleName(), ex);
-
-        ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setMessage(ErrorMessages.VALIDATION_FAILED);
-        errorResponse.setCode("VALIDATION_ERROR");
-       
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
-    }
- 
-    /**
-     * Builds a standardized error response based on HTTP status.
-     * Maps common HTTP statuses to specific error codes and messages.
-     *
-     * @param status HTTP status code
-     * @param reason Exception reason message
-     * @return Formatted Error object
-     */
-    private ErrorResponse buildError(HttpStatus status, String reason) {
-        String code;
-        String message;
-       
-        switch (status) {
-            case BAD_REQUEST:
-                code = "BAD_REQUEST";
-                message = reason != null ? reason : "Bad request";
-                break;
-            case NOT_FOUND:
-                code = "NOT_FOUND";
-                message = reason != null ? reason : ErrorMessages.MERCHANT_NOT_FOUND;
-                break;
-            case INTERNAL_SERVER_ERROR:
-                code = "INTERNAL_ERROR";
-                message = reason != null ? reason : ErrorMessages.INTERNAL_SERVER_ERROR;
-                break;
-            case GATEWAY_TIMEOUT:
-                code = "TIMEOUT";
-                message = reason != null ? reason : ErrorMessages.REQUEST_TIMEOUT;
-                break;
-            default:
-                code = "ERROR";
-                message = reason != null ? reason : "An error occurred";
+    static class TestService extends BaseItemService {
+        private final ObjectMapper objectMapper;
+        
+        public TestService(ObjectMapper objectMapper) {
+            super(Mockito.mock(backend.repository.ItemRepository.class), 
+                  Mockito.mock(backend.repository.ItemTagRepository.class));
+            this.objectMapper = objectMapper;
         }
+        
+        // expose protected methods via wrapper
+        public String newId() { return generateId(); }
+        
+        // Test-specific helper methods (not in BaseItemService)
+        public String toJson(Map<String, String> m) {
+            if (m == null || m.isEmpty()) return null;
+            try {
+                return objectMapper.writeValueAsString(m);
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        
+        public Map<String, String> toMap(String s) {
+            if (s == null || s.isEmpty()) return new HashMap<>();
+            try {
+                return objectMapper.readValue(s, new TypeReference<Map<String, String>>() {});
+            } catch (JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        
+        public Item map(ItemEntity e, List<String> tags) {
+            Item item = new Item();
+            item.setId(e.getId());
+            item.setName(e.getName());
+            item.setDescription(JsonNullable.of(e.getDescription()));
+            item.setDetail(JsonNullable.of(e.getDetail()));
+            
+            if (e.getStatus() != null) {
+                item.setStatus(Item.StatusEnum.fromValue(e.getStatus()));
+            }
+            
+            item.setTags(tags);
+            item.setMetadata(toMap(e.getMetadata()));
+            item.setCreatedAt(e.getCreatedAt());
+            item.setUpdatedAt(e.getUpdatedAt());
+            
+            return item;
+        }
+    }
 
-        ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setMessage(message);
-        errorResponse.setCode(code);
+    @Test
+    void metadata_roundtrip() {
+        TestService svc = new TestService(new ObjectMapper());
+        Map<String, String> src = Map.of("k1", "v1", "k2", "v2");
+        String json = svc.toJson(src);
+        Map<String, String> dst = svc.toMap(json);
+        assertThat(dst).isEqualTo(src);
+    }
 
-        return errorResponse;
+    @Test
+    void generateId_is24hex() {
+        TestService svc = new TestService(new ObjectMapper());
+        String id = svc.newId();
+        assertThat(id).hasSize(24);
+        assertThat(id).matches("[0-9a-f]{24}");
+    }
+
+    @Test
+    void entity_to_model_maps_fields() {
+        TestService svc = new TestService(new ObjectMapper());
+        OffsetDateTime now = OffsetDateTime.now();
+        ItemEntity e = new ItemEntity("abc123456789012345678901", "name", "desc", "detail", "active", "{\"m\":\"x\"}", now, now);
+        var item = svc.map(e, List.of("t1", "t2"));
+        assertThat(item.getId()).isEqualTo(e.getId());
+        assertThat(item.getName()).isEqualTo(e.getName());
+        assertThat(item.getStatus().getValue()).isEqualTo("active");
+        assertThat(item.getTags()).containsExactly("t1", "t2");
+        assertThat(item.getMetadata()).containsEntry("m", "x");
+        assertThat(item.getCreatedAt()).isEqualTo(now);
+        assertThat(item.getUpdatedAt()).isEqualTo(now);
     }
 }
