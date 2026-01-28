@@ -1,440 +1,179 @@
-package com.transaction.config;
+package com.transaction.common.exception;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.transaction.common.constants.ApiNames;
-import com.transaction.common.constants.AppHeaders;
+import com.transaction.analytics.service.model.ErrorResponse;
+import com.transaction.common.messages.AppLogMessages;
+import com.transaction.common.messages.ErrorMessages;
 import com.transaction.common.util.ApplicationLogger;
-import com.transaction.common.util.TelegramLogger;
-import jakarta.servlet.*;
-import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpServletResponse;
-import org.slf4j.MDC;
-import org.springframework.stereotype.Component;
-import org.springframework.web.servlet.HandlerMapping;
-import org.springframework.web.util.ContentCachingResponseWrapper;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.server.ResponseStatusException;
 
-import java.io.IOException;
-import java.io.UnsupportedEncodingException;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
-import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * Global exception handler for centralized error handling across all controllers.
+ * Provides consistent error responses and logging.
+ */
+@RestControllerAdvice
+public class GlobalExceptionHandler {
 
-@Component
-public class LoggingFilter implements Filter {
+    private static final ApplicationLogger logger = ApplicationLogger.getLogger(GlobalExceptionHandler.class);
 
-    private static final ApplicationLogger logger = ApplicationLogger.getLogger(LoggingFilter.class);
-    private static final TelegramLogger telegramLogger = TelegramLogger.getLogger(LoggingFilter.class);
-    private static final ObjectMapper objectMapper = new ObjectMapper();
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidJson(HttpMessageNotReadableException ex) {
+        logger.error(AppLogMessages.VALIDATION_EXCEPTION, ex.getClass().getSimpleName(), ex);
 
-    // MDC and header constants
-    private static final String MDC_KEY_TRACE_ID = "traceId";
-    private static final String MDC_KEY_RECEIVED_AT = "receivedAt";
-    private static final String MDC_KEY_API_NAME = "apiName";
+        ErrorResponse errorResponse = new ErrorResponse();
+        errorResponse.setMessage(ErrorMessages.VALIDATION_FAILED);
+        errorResponse.setCode("VALIDATION_ERROR");
 
-    // Sensitive headers to mask (case-insensitive)
-    private static final Set<String> SENSITIVE_HEADERS = Set.of(
-            "authorization",
-            "x-api-key",
-            "x-auth-token",
-            "cookie",
-            "set-cookie"
-    );
-
-    // Sensitive fields to mask in request/response body
-    private static final Set<String> SENSITIVE_FIELDS = Set.of(
-            "password",
-            "secret",
-            "token",
-            "apiKey",
-            "accessToken",
-            "refreshToken",
-            "creditCard",
-            "ssn"
-    );
-
-    private static final String MASKED_VALUE = "***MASKED***";
-    private static final int MAX_BODY_LOG_SIZE = 10240; // 10 KB limit for logging
-
-    @Override
-    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
-            throws IOException, ServletException {
-        
-        HttpServletRequest httpRequest = (HttpServletRequest) request;
-        HttpServletResponse httpResponse = (HttpServletResponse) response;
-
-        // Create custom wrapper that buffers the request body for multiple reads
-        BufferedRequestWrapper requestWrapper = new BufferedRequestWrapper(httpRequest);
-        ContentCachingResponseWrapper responseWrapper = new ContentCachingResponseWrapper(httpResponse);
-
-        // Step 1: Extract or generate trace headers
-        UUID traceId = extractOrGenerateTraceId(requestWrapper);
-        OffsetDateTime receivedAt = extractOrGenerateReceivedAt(requestWrapper);
-
-        // Step 2: Set up MDC for this request
-        MDC.put(MDC_KEY_TRACE_ID, traceId.toString());
-        MDC.put(MDC_KEY_RECEIVED_AT, receivedAt.toString());
-
-        String apiName = null;
-
-        try {
-            // Step 3: Log incoming request (before processing)
-            logRequest(requestWrapper, traceId, receivedAt);
-
-            // Step 4: Continue with filter chain
-            chain.doFilter(requestWrapper, responseWrapper);
-
-            // Step 5: Resolve API name and set in MDC
-            apiName = resolveApiName(requestWrapper);
-            if (apiName != null) {
-                MDC.put(MDC_KEY_API_NAME, apiName);
-            }
-
-        } catch (Exception e) {
-            logger.error("Exception during request processing", e);
-            throw e;
-        } finally {
-            try {
-                // Ensure API name is resolved
-                if (apiName == null) {
-                    apiName = resolveApiName(requestWrapper);
-                }
-
-                if (apiName != null) {
-                    MDC.put(MDC_KEY_API_NAME, apiName);
-                }
-
-                // Step 6: Log outgoing response
-                logResponse(requestWrapper, responseWrapper, traceId, receivedAt, apiName);
-
-                // Step 7: Copy response body back to client (critical for response functionality)
-                responseWrapper.copyBodyToResponse();
-            } finally {
-                // Step 8: Ensure MDC is cleared (CRITICAL - fixes problem #2)
-                // This must execute even if logging fails
-                MDC.clear();
-            }
-        }
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
     }
 
     /**
-     * Custom request wrapper that buffers the entire request body on first read,
-     * allowing it to be read multiple times (for logging and controller processing).
+     * Handles missing request header exceptions
      */
-    private static class BufferedRequestWrapper extends jakarta.servlet.http.HttpServletRequestWrapper {
-        private byte[] buffer;
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<ErrorResponse> handleMissingRequestHeader(MissingRequestHeaderException ex) {
+        ErrorResponse errorResponse = new ErrorResponse();
+        errorResponse.setMessage("Required request header '" + ex.getHeaderName() + "' is missing");
+        errorResponse.setCode("VALIDATION_ERROR");
 
-        public BufferedRequestWrapper(HttpServletRequest request) throws IOException {
-            super(request);
-            // Always read full body (handles chunked transfer with no Content-Length)
-            try (java.io.InputStream is = request.getInputStream();
-                 java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream()) {
-                byte[] temp = new byte[4096];
-                int read;
-                while ((read = is.read(temp)) != -1) {
-                    baos.write(temp, 0, read);
-                }
-                this.buffer = baos.toByteArray();
-            }
-        }
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+    }
 
-        @Override
-        public ServletInputStream getInputStream() {
-            final java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(buffer);
-            return new ServletInputStream() {
-                @Override
-                public int read() {
-                    return bais.read();
-                }
+   /* *//**
+     * Handles validation errors from @Valid annotation
+     *//*
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponse> handleValidationException(MethodArgumentNotValidException ex) {
+        String combinedMessage = ex.getBindingResult()
+                .getFieldErrors()
+                .stream()
+                .map(fieldError -> fieldError.getField() + ": " + fieldError.getDefaultMessage())
+                .collect(Collectors.joining(", "));
 
-                @Override
-                public boolean isFinished() {
-                    return bais.available() == 0;
-                }
+        ErrorResponse errorResponse = new ErrorResponse();
+        errorResponse.setMessage("Validation failed: " + combinedMessage);
+        errorResponse.setCode("VALIDATION_ERROR");
 
-                @Override
-                public boolean isReady() {
-                    return true;
-                }
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
+    }*/
 
-                @Override
-                public void setReadListener(ReadListener listener) {
-                    throw new UnsupportedOperationException();
-                }
-            };
-        }
-
-        @Override
-        public java.io.BufferedReader getReader() {
-            return new java.io.BufferedReader(
-                new java.io.InputStreamReader(getInputStream(), 
-                    java.nio.charset.StandardCharsets.UTF_8));
-        }
-
-        public byte[] getContentAsByteArray() {
-            return buffer;
-        }
+    /**
+     * Handles ResponseStatusException thrown by Spring controllers.
+     * Maps HTTP status codes to appropriate error codes and messages.
+     */
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<ErrorResponse> handleResponseStatusException(ResponseStatusException ex) {
+        logger.error(AppLogMessages.RESPONSE_STATUS_EXCEPTION, ex.getStatusCode().value(), ex);
+       
+        HttpStatus status = HttpStatus.valueOf(ex.getStatusCode().value());
+        ErrorResponse errorResponse = buildError(status, ex.getReason());
+       
+        return ResponseEntity.status(status).body(errorResponse);
     }
 
     /**
-     * Log incoming request with body content (if present)
+     * Handles BaseException for all business logic.
+     * Maps HTTP status codes to appropriate error codes and messages.
      */
-    private void logRequest(BufferedRequestWrapper request, UUID traceId, OffsetDateTime receivedAt) {
-        Map<String, Object> requestLog = new HashMap<>();
-        requestLog.put("type", "REQUEST");
-        requestLog.put("method", request.getMethod());
-        requestLog.put("uri", request.getRequestURI());
-        
-        // Add query string if present
-        String queryString = request.getQueryString();
-        if (queryString != null && !queryString.isEmpty()) {
-            requestLog.put("queryString", queryString);
-        }
-        
-        requestLog.put("remoteAddr", request.getRemoteAddr());
-        requestLog.put("headers", maskHeaders(getHeaders(request)));
-        
-        // Add request body if present
-        Object requestBody = getRequestBody(request);
-        if (requestBody != null) {
-            Object masked = maskSensitiveFields(requestBody);
-            String bodyStr = masked instanceof String ? (String) masked : masked.toString();
-            if (bodyStr.length() <= MAX_BODY_LOG_SIZE) {
-                requestLog.put("body", masked);
-            } else {
-                requestLog.put("body", "[Body too large to log (" + bodyStr.length() + " bytes)]");
-                requestLog.put("bodySize", bodyStr.length());
-            }
-        }
-        
-        telegramLogger.log(requestLog, "Request received");
+    @ExceptionHandler(BaseException.class)
+    public ResponseEntity<ErrorResponse> handleBaseException(BaseException ex) {
+        logger.error(AppLogMessages.RESPONSE_STATUS_EXCEPTION, ex.getCode(), ex);
+
+        HttpStatus status = ex.getHttpStatus();
+        ErrorResponse errorResponse = new ErrorResponse();
+        errorResponse.setCode(ex.getCode());
+        errorResponse.setMessage(ex.getMessage());
+//        ErrorResponse errorResponse = buildError(status, ex.getMessage());
+
+        return ResponseEntity.status(status).body(errorResponse);
     }
-
+ 
     /**
-     * Log outgoing response with body content (if present)
+     * Handles validation errors from @Valid annotation.
+     * Collects field-level validation errors and returns detailed error information.
      */
-    private void logResponse(BufferedRequestWrapper request, ContentCachingResponseWrapper response,
-                            UUID traceId, OffsetDateTime receivedAt, String apiName) {
-        Map<String, Object> responseLog = new HashMap<>();
-        responseLog.put("type", "RESPONSE");
-        responseLog.put("method", request.getMethod());
-        responseLog.put("uri", request.getRequestURI());
-        responseLog.put("status", response.getStatus());
-        responseLog.put("headers", maskHeaders(getResponseHeaders(response)));
-        
-        // Add response body if present
-        Object responseBody = getResponseBody(response);
-        if (responseBody != null) {
-            Object masked = maskSensitiveFields(responseBody);
-            String bodyStr = masked instanceof String ? (String) masked : masked.toString();
-            if (bodyStr.length() <= MAX_BODY_LOG_SIZE) {
-                responseLog.put("body", masked);
-            } else {
-                responseLog.put("body", "[Body too large to log (" + bodyStr.length() + " bytes)]");
-                responseLog.put("bodySize", bodyStr.length());
-            }
-        }
-        
-        telegramLogger.log(responseLog, "Response sent");
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponse> handleValidationException(MethodArgumentNotValidException ex) {
+        logger.error(AppLogMessages.VALIDATION_EXCEPTION, ex.getBindingResult().getFieldErrorCount(), ex);
+
+        String combinedMessage = ex.getBindingResult()
+                .getFieldErrors()
+                .stream()
+                .map(fieldError ->
+                        fieldError.getField().substring(fieldError.getField().lastIndexOf('.') + 1)
+                                + " " + fieldError.getDefaultMessage()
+                )
+                .distinct()
+                .collect(Collectors.joining(", "));
+
+        ErrorResponse errorResponse = new ErrorResponse();
+        errorResponse.setMessage(ErrorMessages.VALIDATION_FAILED + " -> " + combinedMessage);
+        errorResponse.setCode("VALIDATION_ERROR");
+       
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(errorResponse);
     }
-
+ 
     /**
-     * Extract X-TRACE-ID header or generate a new UUID
+     * Handles all other unexpected exceptions.
+     * Logs the full exception stack trace and returns a generic error response.
      */
-    private UUID extractOrGenerateTraceId(HttpServletRequest request) {
-        // Try uppercase (standard)
-        String traceIdHeader = request.getHeader(AppHeaders.TRACE_ID);
-        
-        if (traceIdHeader != null && !traceIdHeader.isEmpty()) {
-            try {
-                return UUID.fromString(traceIdHeader);
-            } catch (IllegalArgumentException e) {
-                logger.warn("Invalid X-TRACE-ID header value: {}. Generating new trace ID.", traceIdHeader);
-            }
-        }
-        
-        return UUID.randomUUID();
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleGenericException(Exception ex) {
+        logger.error(AppLogMessages.UNEXPECTED_ERROR, ex.getClass().getSimpleName(), ex);
+
+        ErrorResponse errorResponse = new ErrorResponse();
+        errorResponse.setMessage(ErrorMessages.VALIDATION_FAILED);
+        errorResponse.setCode("VALIDATION_ERROR");
+       
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorResponse);
     }
-
+ 
     /**
-     * Extract X-RECEIVED-AT header or use current timestamp
+     * Builds a standardized error response based on HTTP status.
+     * Maps common HTTP statuses to specific error codes and messages.
+     *
+     * @param status HTTP status code
+     * @param reason Exception reason message
+     * @return Formatted Error object
      */
-    private OffsetDateTime extractOrGenerateReceivedAt(HttpServletRequest request) {
-        String receivedAtHeader = request.getHeader(AppHeaders.RECEIVED_AT);
-        
-        if (receivedAtHeader != null && !receivedAtHeader.isEmpty()) {
-            try {
-                return OffsetDateTime.parse(receivedAtHeader, DateTimeFormatter.ISO_OFFSET_DATE_TIME);
-            } catch (DateTimeParseException e) {
-                logger.warn("Invalid X-RECEIVED-AT header value: {}. Using current timestamp.", receivedAtHeader);
-            }
-        }
-        
-        return OffsetDateTime.now(ZoneOffset.UTC);
-    }
-
-    /**
-     * Resolve API name from path pattern using static mapping
-     * Returns a clean API name like "GetItemDetail", "CreateItem", etc.
-     * This is executed after DispatcherServlet routing, so pattern info is available
-     */
-    private String resolveApiName(HttpServletRequest request) {
-        // Get the matched path pattern from HandlerMapping
-        Object pattern = request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);
-        
-        if (pattern != null) {
-            String pathPattern = request.getMethod() + " " + pattern.toString();
-            // Look up API name from static mapping
-            String apiName = ApiNames.API_NAME_BY_ROUTE.get(pathPattern);
-            if (apiName != null) {
-                return apiName;
-            }
-            // Fallback: return pattern if not found in mapping
-            return pathPattern;
-        }
-        
-        // Last fallback: use method + URI
-        return request.getMethod() + " " + request.getRequestURI();
-    }
-
-    /**
-     * Extract request headers as a map
-     */
-    private Map<String, String> getHeaders(HttpServletRequest request) {
-        Map<String, String> headers = new HashMap<>();
-        Enumeration<String> headerNames = request.getHeaderNames();
-        while (headerNames.hasMoreElements()) {
-            String headerName = headerNames.nextElement();
-            headers.put(headerName, request.getHeader(headerName));
-        }
-        return headers;
-    }
-
-    /**
-     * Extract response headers as a map
-     */
-    private Map<String, String> getResponseHeaders(HttpServletResponse response) {
-        Map<String, String> headers = new HashMap<>();
-        for (String headerName : response.getHeaderNames()) {
-            headers.put(headerName, response.getHeader(headerName));
-        }
-        return headers;
-    }
-
-    /**
-     * Mask sensitive header values (case-insensitive)
-     */
-    private Map<String, String> maskHeaders(Map<String, String> headers) {
-        if (headers == null || headers.isEmpty()) {
-            return headers;
-        }
-        return headers.entrySet().stream()
-            .collect(Collectors.toMap(
-                Map.Entry::getKey,
-                entry -> isSensitiveHeader(entry.getKey()) ? MASKED_VALUE : entry.getValue()
-            ));
-    }
-
-    /**
-     * Check if header name is sensitive (case-insensitive)
-     */
-    private boolean isSensitiveHeader(String headerName) {
-        return SENSITIVE_HEADERS.contains(headerName.toLowerCase());
-    }
-
-    /**
-     * Recursively mask sensitive fields in object (Map, List, or primitive)
-     */
-    @SuppressWarnings("unchecked")
-    private Object maskSensitiveFields(Object obj) {
-        if (obj == null) {
-            return null;
+    private ErrorResponse buildError(HttpStatus status, String reason) {
+        String code;
+        String message;
+       
+        switch (status) {
+            case BAD_REQUEST:
+                code = "BAD_REQUEST";
+                message = reason != null ? reason : "Bad request";
+                break;
+            case NOT_FOUND:
+                code = "NOT_FOUND";
+                message = reason != null ? reason : ErrorMessages.MERCHANT_NOT_FOUND;
+                break;
+            case INTERNAL_SERVER_ERROR:
+                code = "INTERNAL_ERROR";
+                message = reason != null ? reason : ErrorMessages.INTERNAL_SERVER_ERROR;
+                break;
+            case GATEWAY_TIMEOUT:
+                code = "TIMEOUT";
+                message = reason != null ? reason : ErrorMessages.REQUEST_TIMEOUT;
+                break;
+            default:
+                code = "ERROR";
+                message = reason != null ? reason : "An error occurred";
         }
 
-        if (obj instanceof Map) {
-            Map<String, Object> map = (Map<String, Object>) obj;
-            Map<String, Object> masked = new HashMap<>();
-            for (Map.Entry<String, Object> entry : map.entrySet()) {
-                String key = entry.getKey();
-                if (isSensitiveField(key)) {
-                    masked.put(key, MASKED_VALUE);
-                } else {
-                    masked.put(key, maskSensitiveFields(entry.getValue()));
-                }
-            }
-            return masked;
-        } else if (obj instanceof List) {
-            List<Object> list = (List<Object>) obj;
-            return list.stream()
-                .map(this::maskSensitiveFields)
-                .collect(Collectors.toList());
-        }
+        ErrorResponse errorResponse = new ErrorResponse();
+        errorResponse.setMessage(message);
+        errorResponse.setCode(code);
 
-        return obj;
-    }
-
-    /**
-     * Check if field name is sensitive (case-insensitive)
-     */
-    private boolean isSensitiveField(String fieldName) {
-        return SENSITIVE_FIELDS.stream()
-            .anyMatch(sensitive -> fieldName.toLowerCase().contains(sensitive.toLowerCase()));
-    }
-
-    /**
-     * Extract and parse request body (try JSON first, fallback to string)
-     */
-    private Object getRequestBody(BufferedRequestWrapper request) {
-        try {
-            byte[] content = request.getContentAsByteArray();
-            if (content.length == 0) {
-                return null;
-            }
-            
-            String contentString = new String(content, 
-                    request.getCharacterEncoding() != null ? 
-                    request.getCharacterEncoding() : "UTF-8");
-            
-            // Try to parse as JSON for structured logging
-            try {
-                return objectMapper.readValue(contentString, Object.class);
-            } catch (Exception e) {
-                // If not valid JSON, return as string
-                return contentString;
-            }
-        } catch (Exception e) {
-            logger.warn("Unable to read request body", e);
-            return null;
-        }
-    }
-
-    /**
-     * Extract and parse response body (try JSON first, fallback to string)
-     */
-    private Object getResponseBody(ContentCachingResponseWrapper response) {
-        byte[] content = response.getContentAsByteArray();
-        if (content.length == 0) {
-            return null;
-        }
-        
-        try {
-            String contentString = new String(content, 
-                    response.getCharacterEncoding() != null ? 
-                    response.getCharacterEncoding() : "UTF-8");
-            
-            // Try to parse as JSON for structured logging
-            try {
-                return objectMapper.readValue(contentString, Object.class);
-            } catch (Exception e) {
-                // If not valid JSON, return as string
-                return contentString;
-            }
-        } catch (UnsupportedEncodingException e) {
-            logger.warn("Unable to decode response body", e);
-            return "***UNABLE_TO_DECODE***";
-        }
+        return errorResponse;
     }
 }
