@@ -1,0 +1,27 @@
+package com.transaction.common.util;
+
+import java.util.Map;
+
+/**
+ * Dedicated logger for telegram (HTTP request/response) logs. 
+ * Emits top-level type="Telegram" while reusing common fields from ApplicationLogger.
+ */
+public class TelegramLogger {
+    
+    private final ApplicationLogger appLogger;
+
+    private TelegramLogger(ApplicationLogger appLogger) {
+        this.appLogger = appLogger;
+    }
+
+    public static TelegramLogger getLogger(Class<?> clazz) {
+        return new TelegramLogger(ApplicationLogger.getLogger(clazz));
+    }
+
+    public void log(Map<String, Object> telegramData, String message) {
+        Map<String, Object> logMap = appLogger.createLogMap(message);
+        logMap.put("type", "Telegram");
+        logMap.put("details", telegramData);
+        appLogger.infoWithLogMap(logMap, message);
+    }
+}
