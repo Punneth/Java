@@ -1,0 +1,123 @@
+API Test Guide (app/src/test)
+This directory contains the test foundation, CSV-driven API integration test cases, and supporting resources. Tests run against a Spring Boot embedded server using a random port by default, with an optional switch to an external endpoint via .env.
+
+Structure
+app/src/test/
+├── java/
+│  ├── com/
+│  │  └── ndps/
+│  │     └── testsupport/
+│  │        ├── ApiTestBase.java
+│  │        ├── CsvApiIntegrationTest.java
+│  │        ├── ApiCase.java
+│  │        └── CsvCaseLoader.java
+│  └── backend/
+│     └── api/
+│        └── items/
+│           └── ItemApiCsvIT.java
+├── resources/
+│  ├── .env
+│  └── api/
+│     └── items/
+│        ├── cases.csv
+│        ├── README.md
+│        ├── req-bodies/
+│        ├── resp-bodies/
+│        ├── req-headers/
+│        └── resp-headers/
+│           ├── default.properties
+│           └── sample.properties
+└── README.md  ← this file
+Testsupport Roles
+ApiCase.java: DTO representing a single CSV case; holds name, method, path, request, expected, status, headersFile, and responseHeadersFile.
+CsvCaseLoader.java: Parses cases.csv by header names and converts rows to ApiCase. If the method column is absent, defaults to GET.
+CsvApiIntegrationTest.java: Common test logic that sends real HTTP requests via RestAssured based on ApiCase. Loads per-case headers from .properties and sends them as-is (placeholders like ${TRACE_ID}/${RECEIVED_AT} are resolved dynamically). Expected bodies are verified using Jackson-based JSON structural comparison (insensitive to formatting differences).
+ApiTestBase.java: Base for the Spring Boot context and RestAssured setup. Defaults to embedded RANDOM_PORT connection. Switches to an external endpoint only when TEST_API_EXTERNAL=true is set. URL/port/base path are injected from .env/environment variables.
+API Test Java Files
+app/src/test/java/backend/api/items/ItemApiCsvIT.java
+Boots the app with @SpringBootTest(webEnvironment = RANDOM_PORT) and executes each case from cases.csv via CsvApiIntegrationTest.
+Resources
+app/src/test/resources/.env
+Used to switch to an external endpoint, specify connection settings, and inject header names.
+Examples:
+TEST_API_EXTERNAL=true
+TEST_API_BASE_URL=http://localhost
+TEST_API_PORT=8080
+TEST_API_BASE_PATH=/api (if needed)
+TEST_HEADER_TRACE_ID=X-TRACE-ID
+TEST_HEADER_RECEIVED_AT=X-RECEIVED-AT
+app/src/test/resources/api/items/cases.csv
+CSV test case definition. Columns: name,method,path,requestHeader,request,expected,responseHeader,status.
+requestHeader: - or default loads default.properties.
+responseHeader: - or default loads resp-headers/default.properties; leave blank to skip header assertions.
+app/src/test/resources/api/items/req-headers/default.properties
+Default headers: Accept=application/json, X-TRACE-ID=${TRACE_ID}, X-RECEIVED-AT=${RECEIVED-AT}.
+Placeholders expand at runtime: ${TRACE_ID} → UUID; ${RECEIVED-AT} → current ISO 8601 timestamp.
+app/src/test/resources/api/items/req-headers/sample.properties
+Example fixed headers for documentation/demo.
+app/src/test/resources/api/items/req-bodies/ and app/src/test/resources/api/items/resp-bodies/
+Request bodies and expected response payloads referenced by cases.csv.
+Header Policy
+Headers are sent as specified in .properties files (${TRACE_ID}/${RECEIVED_AT} are resolved dynamically).
+Default example: in req-headers/default.properties, set Accept=application/json, X-TRACE-ID=${TRACE_ID}, and X-RECEIVED-AT=${RECEIVED-AT}.
+Response header assertions follow resp-headers/*.properties, expanding ${TRACE_ID}/${RECEIVED-AT} to match the sent values.
+CSV Format & Case Description
+Columns: name,method,path,requestHeader,request,expected,responseHeader,status
+name: Case name (for reporting)
+method (optional): HTTP method; when blank or missing defaults to GET
+path: API path (e.g., /v1/items)
+requestHeader: .properties filename under req-headers/; - or default to use defaults
+request: Relative path to request body file under req-bodies/ (blank for no body)
+expected: Relative path to expected response payload file under resp-bodies/ (use - when no body is expected)
+responseHeader: .properties filename under resp-headers/; - or default for default assertions; blank to skip
+status: Expected HTTP status code (e.g., 200)
+How to Run
+Embedded server (default, random port):
+mvn -f app/pom.xml verify
+Against an external endpoint (e.g., localhost:8080):
+Set the following in app/src/test/resources/.env
+TEST_API_EXTERNAL=true
+TEST_API_BASE_URL=http://localhost
+TEST_API_PORT=8080
+Run
+mvn -f app/pom.xml verify
+Environment Priority
+Environment variable priority (as read by ApiTestBase)
+src/test/resources/.env
+Project root .env
+System.getenv (OS/CI environment)
+Package Policy
+Testsupport code resides in the neutral package com.ndps.testsupport.
+Domain ITs (e.g., app/src/test/java/backend/api/items/ItemApiCsvIT.java) import com.ndps.testsupport.*.
+JSON Assertion
+Expected bodies are validated via Jackson JsonNode structural comparison. It does not fail due to formatting differences (newlines, spaces, indentation).
+Formatting differences (whitespace/indentation) are ignored. Object field sets and array lengths are strict, while values can be matched flexibly using placeholders.
+Placeholder List (usable in expected JSON)
+${ANY} / ${IGNORE}: Accept any non-null value (presence required)
+${NULL}: Expect null
+${UUID}: Accept a UUID (v1–v5)
+${ISO_DATETIME}: Accept ISO-8601 datetime (parseable as OffsetDateTime/Instant/LocalDateTime)
+${ISO_DATE}: Accept ISO-8601 date (yyyy-MM-dd)
+${NUMBER}: Accept a number (numeric strings allowed)
+${BOOLEAN}: Accept a boolean (true/false strings allowed)
+${URL}: Accept a value parseable as URL
+${REGEX:...}: Match by regular expression (e.g., ${REGEX:^https?://example\.com/.+$})
+${CONTAINS:...}: String contains
+${STARTS_WITH:...}: String starts with
+${ENDS_WITH:...}: String ends with
+${SET:a|b|c}: Match any from the given set
+Notes:
+
+Object field sets and array lengths are strict (extra/missing cause mismatch).
+Use the tokens above only for values that need to be flexible.
+Example
+{
+  "id": "${UUID}",
+  "createdAt": "${ISO_DATETIME}",
+  "url": "${REGEX:^https?://.+}",
+  "message": "${CONTAINS:created}"
+}
+Notes
+Tests use H2 via test profile overrides (@SpringBootTest properties).
+Failsafe executes integration tests during the verify phase; reports are written to target/failsafe-reports/.
+This README centralizes the structure and operating rules for API tests. When adding cases, update cases.csv/requests/expected/headers accordingly, and add a new *CsvIT test class for each API area when needed.
