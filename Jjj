@@ -1,0 +1,364 @@
+Here's the test following the same pattern as your example - simple, focused, and without mocking frameworks:
+package com.transaction.controller;
+
+import com.transaction.common.constants.AppHeaders;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.time.OffsetDateTime;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+class BaseTransactionAnalyticsControllerTest {
+
+    static class TestController extends BaseTransactionAnalyticsController {
+        public TestController(NativeWebRequest request, ExecutorService executorService) {
+            super(request, executorService);
+        }
+
+        // Expose protected methods for testing
+        public <T> ResponseEntity<T> execute(
+                java.util.function.Supplier<ResponseEntity<T>> operation,
+                String operationName,
+                UUID xTraceId,
+                OffsetDateTime xReceivedAt) {
+            return executeWithTimeout(operation, operationName, xTraceId, xReceivedAt);
+        }
+
+        public <T> ResponseEntity<T> executeCustom(
+                java.util.function.Supplier<ResponseEntity<T>> operation,
+                String operationName,
+                UUID xTraceId,
+                OffsetDateTime xReceivedAt,
+                long customTimeoutMs) {
+            return executeWithTimeout(operation, operationName, xTraceId, xReceivedAt, customTimeoutMs);
+        }
+
+        public ResponseEntity.BodyBuilder headers(
+                ResponseEntity.BodyBuilder builder,
+                UUID xTraceId,
+                OffsetDateTime xReceivedAt) {
+            return withStandardHeaders(builder, xTraceId, xReceivedAt);
+        }
+    }
+
+    private ExecutorService executorService;
+
+    @AfterEach
+    void tearDown() {
+        if (executorService != null) {
+            executorService.shutdown();
+        }
+    }
+
+    @Test
+    void getRequest_returns_present_when_not_null() {
+        executorService = Executors.newSingleThreadExecutor();
+        NativeWebRequest request = org.mockito.Mockito.mock(NativeWebRequest.class);
+        TestController controller = new TestController(request, executorService);
+
+        var result = controller.getRequest();
+
+        assertThat(result).isPresent();
+        assertThat(result.get()).isEqualTo(request);
+    }
+
+    @Test
+    void getRequest_returns_empty_when_null() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+
+        var result = controller.getRequest();
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test
+    void withStandardHeaders_adds_trace_and_received_headers() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        UUID traceId = UUID.randomUUID();
+        OffsetDateTime receivedAt = OffsetDateTime.now();
+
+        ResponseEntity<String> response = controller
+                .headers(ResponseEntity.ok(), traceId, receivedAt)
+                .body("test");
+
+        assertThat(response.getHeaders().getFirst(AppHeaders.TRACE_ID)).isEqualTo(traceId.toString());
+        assertThat(response.getHeaders().getFirst(AppHeaders.RECEIVED_AT)).isEqualTo(receivedAt.toString());
+        assertThat(response.getBody()).isEqualTo("test");
+    }
+
+    @Test
+    void executeWithTimeout_success_returns_response() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 5000;
+
+        ResponseEntity<String> response = controller.execute(
+                () -> ResponseEntity.ok("success"),
+                "testOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now()
+        );
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isEqualTo("success");
+    }
+
+    @Test
+    void executeWithTimeout_returns_created_status() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 5000;
+
+        ResponseEntity<String> response = controller.execute(
+                () -> ResponseEntity.status(HttpStatus.CREATED).body("created"),
+                "createOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now()
+        );
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody()).isEqualTo("created");
+    }
+
+    @Test
+    void executeWithTimeout_throws_when_operation_fails() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 5000;
+
+        assertThatThrownBy(() -> controller.execute(
+                () -> { throw new RuntimeException("test error"); },
+                "failOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now()
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Error executing operation")
+                .extracting(ex -> ((ResponseStatusException) ex).getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    void executeWithTimeout_throws_gateway_timeout_on_slow_operation() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 100; // 100ms timeout
+
+        assertThatThrownBy(() -> controller.execute(
+                () -> {
+                    try {
+                        Thread.sleep(5000); // Sleep 5 seconds
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return ResponseEntity.ok("delayed");
+                },
+                "slowOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now()
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("Request timeout")
+                .hasMessageContaining("100ms")
+                .extracting(ex -> ((ResponseStatusException) ex).getStatusCode())
+                .isEqualTo(HttpStatus.GATEWAY_TIMEOUT);
+    }
+
+    @Test
+    void executeWithCustomTimeout_success_returns_response() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+
+        ResponseEntity<String> response = controller.executeCustom(
+                () -> ResponseEntity.ok("custom"),
+                "customOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now(),
+                3000L
+        );
+
+        assertThat(response.getBody()).isEqualTo("custom");
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void executeWithCustomTimeout_throws_on_timeout() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+
+        assertThatThrownBy(() -> controller.executeCustom(
+                () -> {
+                    try {
+                        Thread.sleep(5000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return ResponseEntity.ok("delayed");
+                },
+                "slowCustomOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now(),
+                100L
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("100ms")
+                .extracting(ex -> ((ResponseStatusException) ex).getStatusCode())
+                .isEqualTo(HttpStatus.GATEWAY_TIMEOUT);
+    }
+
+    @Test
+    void executeWithCustomTimeout_throws_on_error() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+
+        assertThatThrownBy(() -> controller.executeCustom(
+                () -> { throw new IllegalStateException("custom error"); },
+                "errorOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now(),
+                2000L
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .extracting(ex -> ((ResponseStatusException) ex).getStatusCode())
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    void executeWithTimeout_fast_operation_completes() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 5000;
+
+        ResponseEntity<String> response = controller.execute(
+                () -> {
+                    try {
+                        Thread.sleep(50); // Quick operation
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return ResponseEntity.ok("fast");
+                },
+                "fastOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now()
+        );
+
+        assertThat(response.getBody()).isEqualTo("fast");
+    }
+
+    @Test
+    void withStandardHeaders_works_with_different_status_codes() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        UUID traceId = UUID.randomUUID();
+        OffsetDateTime receivedAt = OffsetDateTime.now();
+
+        // Test CREATED
+        ResponseEntity<String> created = controller
+                .headers(ResponseEntity.status(HttpStatus.CREATED), traceId, receivedAt)
+                .body("created");
+        assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(created.getHeaders().getFirst(AppHeaders.TRACE_ID)).isEqualTo(traceId.toString());
+
+        // Test ACCEPTED
+        ResponseEntity<String> accepted = controller
+                .headers(ResponseEntity.status(HttpStatus.ACCEPTED), traceId, receivedAt)
+                .body("accepted");
+        assertThat(accepted.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+
+        // Test NO_CONTENT
+        ResponseEntity<Void> noContent = controller
+                .headers(ResponseEntity.noContent(), traceId, receivedAt)
+                .build();
+        assertThat(noContent.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        assertThat(noContent.getHeaders().getFirst(AppHeaders.RECEIVED_AT)).isNotNull();
+    }
+
+    @Test
+    void executeWithTimeout_handles_null_response() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 5000;
+
+        ResponseEntity<String> response = controller.execute(
+                () -> null,
+                "nullOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now()
+        );
+
+        assertThat(response).isNull();
+    }
+
+    @Test
+    void executeWithTimeout_multiple_calls_succeed() {
+        executorService = Executors.newFixedThreadPool(2);
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 5000;
+
+        for (int i = 0; i < 5; i++) {
+            ResponseEntity<String> response = controller.execute(
+                    () -> ResponseEntity.ok("call-" + i),
+                    "multiOp" + i,
+                    UUID.randomUUID(),
+                    OffsetDateTime.now()
+            );
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        }
+    }
+
+    @Test
+    void executeWithTimeout_complex_response_type() {
+        executorService = Executors.newSingleThreadExecutor();
+        TestController controller = new TestController(null, executorService);
+        controller.timeoutMs = 5000;
+
+        TestResponse expectedBody = new TestResponse("data", 123);
+
+        ResponseEntity<TestResponse> response = controller.execute(
+                () -> ResponseEntity.ok(expectedBody),
+                "complexOp",
+                UUID.randomUUID(),
+                OffsetDateTime.now()
+        );
+
+        assertThat(response.getBody()).isEqualTo(expectedBody);
+        assertThat(response.getBody().data).isEqualTo("data");
+        assertThat(response.getBody().code).isEqualTo(123);
+    }
+
+    // Helper class for testing complex types
+    static class TestResponse {
+        final String data;
+        final int code;
+
+        TestResponse(String data, int code) {
+            this.data = data;
+            this.code = code;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            TestResponse that = (TestResponse) o;
+            return code == that.code && data.equals(that.data);
+        }
+
+        @Override
+        public int hashCode() {
+            return data.hashCode() + code;
+        }
+    }
+}
