@@ -1,0 +1,293 @@
+package com.transaction.service;
+
+import com.transaction.common.constants.ErrorCodeEnum;
+import com.transaction.common.exception.AnalyticsServiceUnavailableException;
+import com.transaction.common.util.ApplicationLogger;
+import com.transaction.dto.ChannelProductDTO;
+import com.transaction.dto.OnlineQrTransactionSummaryDTO;
+import com.transaction.dto.PosTransactionSummaryDTO;
+import com.transaction.repository.ChannelProductMasterRepository;
+import com.transaction.repository.MerchantBasicInfoRepository;
+import com.transaction.repository.TitanTransactionDetailsRepository;
+import com.transaction.repository.TitanTransactionRepository;
+import com.transaction.service.impl.TransactionAnalyticServiceImpl;
+import lombok.RequiredArgsConstructor;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
+import org.springframework.retry.annotation.Retryable;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Service
+@RequiredArgsConstructor
+public class TransactionAnalyticsRetryFacade {
+
+    private static final ApplicationLogger logger = ApplicationLogger.getLogger(TransactionAnalyticsRetryFacade.class);
+
+    private final TitanTransactionRepository titanTransactionRepository;
+    private final TitanTransactionDetailsRepository titanTransactionDetailsRepository;
+    private final MerchantBasicInfoRepository merchantBasicInfoRepository;
+    private final ChannelProductMasterRepository channelProductMasterRepository;
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class,
+                    CannotGetJdbcConnectionException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    public List<PosTransactionSummaryDTO> getPosTransactions(
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds
+    ) {
+        return titanTransactionRepository.getPosTransactions(from, to, merchantIds);
+    }
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class,
+                    CannotGetJdbcConnectionException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    public List<OnlineQrTransactionSummaryDTO> getOnlineQrTransactions(
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        return titanTransactionDetailsRepository
+                .getOnlineOrQrTransactions(from, to, merchantIds, channelId);
+    }
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class,
+                    CannotGetJdbcConnectionException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    public int countInitiated(
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        return titanTransactionDetailsRepository
+                .countInitiated(from, to, merchantIds, channelId);
+    }
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class,
+                    CannotGetJdbcConnectionException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    public int countAttempted(
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        return titanTransactionDetailsRepository
+                .countAttempted(from, to, merchantIds, channelId);
+    }
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class,
+                    CannotGetJdbcConnectionException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    public int countReverted(
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        return titanTransactionDetailsRepository
+                .countReverted(from, to, merchantIds, channelId);
+    }
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class,
+                    CannotGetJdbcConnectionException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    public List<Integer> getMerchantsForReseller(
+            Integer sourceId,
+            Integer subSourceId
+    ) {
+        return merchantBasicInfoRepository
+                .findMerchantsForReseller(sourceId, subSourceId);
+    }
+
+    @Retryable(
+            value = {
+                    DataAccessException.class,
+                    QueryTimeoutException.class,
+                    CannotAcquireLockException.class,
+                    CannotGetJdbcConnectionException.class
+            },
+            maxAttemptsExpression = "#{@txnRetryConfig.maxAttempts}",
+            backoff = @Backoff(
+                    delayExpression = "#{@txnRetryConfig.delay}",
+                    multiplierExpression = "#{@txnRetryConfig.multiplier}"
+            )
+    )
+    public List<ChannelProductDTO> getAllChannelProducts() {
+        return channelProductMasterRepository.findAllProductsAsDTO();
+    }
+
+    @Recover
+    public List<OnlineQrTransactionSummaryDTO> recoverOnlineQrTransactions(
+            Throwable ex,
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        logger.error("DB failed after retries: {}", ex.getMessage());
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(),
+                ErrorCodeEnum.DATABASE_ERROR.getErrorCode(),
+                ex
+        );
+    }
+
+    @Recover
+    public List<PosTransactionSummaryDTO> recoverPosTransactions(
+            Throwable ex,
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds
+    ) {
+        logger.error("DB failed after retries: {}", ex.getMessage());
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(),
+                ErrorCodeEnum.DATABASE_ERROR.getErrorCode(),
+                ex
+        );
+    }
+
+    @Recover
+    public List<Integer> recoverGetMerchantsForReseller(
+            Throwable ex,
+            Integer sourceId,
+            Integer subSourceId
+    ) {
+        logger.error("DB failed after retries: {}", ex.getMessage());
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(),
+                ErrorCodeEnum.DATABASE_ERROR.getErrorCode(),
+                ex
+        );
+    }
+
+    @Recover
+    public int recoverCountInitiated(
+            Throwable ex,
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        logger.error("DB failed after retries: {}", ex.getMessage());
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(),
+                ErrorCodeEnum.DATABASE_ERROR.getErrorCode(),
+                ex
+        );
+    }
+
+    @Recover
+    public int recoverCountAttempted(
+            Throwable ex,
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        logger.error("DB failed after retries: {}", ex.getMessage());
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(),
+                ErrorCodeEnum.DATABASE_ERROR.getErrorCode(),
+                ex
+        );
+    }
+
+    @Recover
+    public int recoverCountReverted(
+            Throwable ex,
+            LocalDateTime from,
+            LocalDateTime to,
+            List<Integer> merchantIds,
+            Integer channelId
+    ) {
+        logger.error("DB failed after retries: {}", ex.getMessage());
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(),
+                ErrorCodeEnum.DATABASE_ERROR.getErrorCode(),
+                ex
+        );
+    }
+
+    @Recover
+    public List<ChannelProductDTO> recoverGetAllChannelProducts(Throwable ex) {
+        logger.error("DB failed after retries: {}", ex.getMessage());
+        throw new AnalyticsServiceUnavailableException(
+                ErrorCodeEnum.DATABASE_ERROR.getErrorMessage(),
+                ErrorCodeEnum.DATABASE_ERROR.getErrorCode(),
+                ex
+        );
+    }
+
+}
+ 
