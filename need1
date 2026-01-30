@@ -1,0 +1,3 @@
+name,method,path,requestHeader,request,expected,responseHeader,status
+fetch_analytics_online_merchant_success,POST,/v1/fetchTxnAnalyticsData,default.properties,online-merchant-success.json,online-merchant-success-response.json,default.properties,200
+fetch_analytics_merchant_not_found,POST,/v1/fetchTxnAnalyticsData,default.properties,merchant-not-found.json,merchant-not-found-error.json,default.properties,404
